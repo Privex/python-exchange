@@ -1,6 +1,13 @@
 # Python Crytocurrency Exchange all-in-one Library
 
-[![Build Status](https://travis-ci.com/Privex/python-exchange.svg?branch=master)](https://travis-ci.com/Privex/python-exchange)
+[![Documentation Status](https://readthedocs.org/projects/python-exchange/badge/?version=latest)](https://python-exchange.readthedocs.io/en/latest/?badge=latest) 
+[![Build Status](https://travis-ci.com/Privex/python-exchange.svg?branch=master)](https://travis-ci.com/Privex/python-exchange) 
+[![Codecov](https://img.shields.io/codecov/c/github/Privex/python-exchange)](https://codecov.io/gh/Privex/python-exchange)
+[![PyPi Version](https://img.shields.io/pypi/v/privex-exchange.svg)](https://pypi.org/project/privex-exchange/)
+![License Button](https://img.shields.io/pypi/l/privex-exchange) 
+![PyPI - Downloads](https://img.shields.io/pypi/dm/privex-exchange)
+![PyPI - Python Version](https://img.shields.io/pypi/pyversions/privex-exchange) 
+![GitHub last commit](https://img.shields.io/github/last-commit/Privex/python-exchange)
 
 A small library for querying Cryptocurrency exchanges and other price sources
 
