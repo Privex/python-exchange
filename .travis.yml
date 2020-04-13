@@ -1,0 +1,16 @@
+dist: bionic
+services:
+  - redis-server
+  - memcached
+language: python
+cache: pip
+python:
+  - "3.6"
+  - "3.7"
+  - "3.8"
+  - "nightly"
+install:
+  - pip install -U '.[dev]'
+script: python3 -m pytest --cov=./privex -v -rxXs tests/
+after_success:
+  - codecov

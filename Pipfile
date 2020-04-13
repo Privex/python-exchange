@@ -1,0 +1,28 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[dev-packages]
+jupyter-console = "*"
+jupyter-core = "*"
+jupyter-client = "*"
+wheel = "*"
+setuptools = "*"
+twine = "*"
+privex-helpers = {extras = ["dev"],version = ">=2.10.0"}
+pytest = "*"
+pytest-cov = "*"
+coverage = "*"
+codecov = "*"
+pytest-asyncio = "*"
+
+[packages]
+privex-helpers = {extras = ["cache"],version = ">=2.10.0"}
+httpx = "*"
+attrs = "*"
+async_property = "*"
+nest-asyncio = "*"
+
+[requires]
+python_version = "3.8"
