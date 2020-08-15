@@ -3,18 +3,21 @@ from typing import Set, Tuple, Optional, AsyncGenerator, Dict, List, Union
 
 from async_property import async_property
 from httpx import HTTPError
-from privex.helpers import cached, empty, awaitable_class, r_cache_async
+from privex.helpers import empty, awaitable_class, r_cache_async
 
-from privex.exchange.base import ExchangeAdapter, PriceData, ExchangeDown, PairNotFound
+from privex.exchange.base import PriceData, AsyncProvidesAdapter
+from privex.exchange.exceptions import PairNotFound, ExchangeDown
 import httpx
 
 import logging
 
 log = logging.getLogger(__name__)
 
+# cached = adapter_get()
 
-@awaitable_class
-class Kraken(ExchangeAdapter):
+
+# @awaitable_class
+class Kraken(AsyncProvidesAdapter):
     TICKER_API = 'https://api.kraken.com/0/public'
     
     name = "Kraken"
@@ -132,7 +135,9 @@ class Kraken(ExchangeAdapter):
     async def load_pairs(self) -> List[str]:
         # If we don't have it in the privex-helpers cache, query the Bittrex API, cache the data and return it.
         data = []
-        async for pair in self._load_pairs():
+        log.debug("[load_pairs] Loading %s pairs via _load_pairs", self.code)
+        pairs = await self._load_pairs()
+        for pair in pairs:
             # Kraken pairs are formatted like 'BTCUSD', so we need to scan the pair to figure out what
             # the 'to_coin' symbol actually is, then we can extract the from_coin.
             b = self._find_base(pair)
@@ -144,29 +149,34 @@ class Kraken(ExchangeAdapter):
                 to_coin = self.symbol_map[b]
             if from_coin in self.symbol_map:
                 from_coin = self.symbol_map[from_coin]
+            log.debug("Adding %s pair '%s_%s'", self.code, from_coin.upper(), to_coin.upper())
             data += [f"{from_coin.upper()}_{to_coin.upper()}"]
     
         # await cached.set(ckey, data)
-    
+        log.debug("Returning pair data: %s", data)
         return data
 
-    async def _load_pairs(self) -> AsyncGenerator[str, None]:
+    # async def _load_pairs(self) -> AsyncGenerator[str, None]:
+    async def _load_pairs(self) -> List[str]:
         """
         Used internally by :meth:`.get_tickers`
 
         Queries the Bittrex market API :attr:`.MARKET_API` asynchronously, and returns
         ``Tuple[str, str]`` objects as an async generator::
 
-            >>> async for frm_coin, to_coin in self._load_pairs():
+            >>> for frm_coin, to_coin in self._load_pairs():
             ...     print(frm_coin, to_coin)
 
         :return AsyncGenerator[PriceData,None] ticker: An async generator of ticker pairs
         """
         res = await self._query('AssetPairs?info=fees')
         # Loop over each ticker dictionary and return the pair
-        for k, v in res['result'].items():  # type: dict
-            yield k
-
+        pairs = []
+        for k, v in res['result'].items():
+            # yield k
+            pairs.append(k)
+        return pairs
+    
     async def _get_ticker(self, pair: str):
         res = await self._query(f'Ticker?pair={pair}')
         res: dict = res['result']
@@ -227,24 +237,29 @@ class Kraken(ExchangeAdapter):
             _provides.add(tuple(k.split('_')))
         return _provides
     
-    @async_property
-    async def provides(self) -> Set[Tuple[str, str]]:
-        """
-        Kraken provides ALL of their tickers through one GET query, so we can generate ``provides``
-        simply by querying their API via :meth:`.load_pairs` (using :meth:`._gen_provides`)
-
-        We cache the provides Set both class-locally in :attr:`._provides`, as well as via the Privex Helpers
-        Cache system - :mod:`privex.helpers.cache`
-
-        """
-        if empty(self._provides, itr=True):
-            _prov = await cached.get(f"pvxex:{self.code}:provides")
-            if not empty(_prov):
-                self._provides = _prov
-            else:
-                self._provides = await self._gen_provides()
-                await cached.set(f"pvxex:{self.code}:provides", self._provides)
-        return self._provides
+    # @async_property
+    # async def provides(self) -> Set[Tuple[str, str]]:
+    #     """
+    #     Kraken provides ALL of their tickers through one GET query, so we can generate ``provides``
+    #     simply by querying their API via :meth:`.load_pairs` (using :meth:`._gen_provides`)
+    #
+    #     We cache the provides Set both class-locally in :attr:`._provides`, as well as via the Privex Helpers
+    #     Cache system - :mod:`privex.helpers.cache`
+    #
+    #     """
+    #     if empty(self._provides, itr=True):
+    #         log.debug("Getting _provides from cache for %s", self.code)
+    #         _prov = await self.cache.get(f"pvxex:{self.code}:provides")
+    #         if not empty(_prov):
+    #             # log.debug("Got _provides from cache")
+    #             self._provides = _prov
+    #         else:
+    #             # log.debug("Calling _gen_provides for %s", self.code)
+    #             self._provides = await self._gen_provides()
+    #             # log.debug("Adding _provides to cache for %s : %s", self.code, self._provides)
+    #             await self.cache.set(f"pvxex:{self.code}:provides", self._provides)
+    #     # log.debug("Returning _provides")
+    #     return self._provides
     
     async def _get_pair(self, from_coin: str, to_coin: str) -> PriceData:
         from_coin, to_coin = from_coin.upper(), to_coin.upper()

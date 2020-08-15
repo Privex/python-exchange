@@ -1,5 +1,5 @@
 from decimal import Decimal
-from privex.exchange import Binance
+from privex.exchange import Huobi
 import pytest
 import nest_asyncio
 
@@ -10,13 +10,13 @@ nest_asyncio.apply()
 
 @pytest.fixture()
 async def adapter():
-    adapter = Binance()
+    adapter = Huobi()
     yield adapter
     del adapter
 
 
 @pytest.mark.asyncio
-async def test_get_pair_btcusd(adapter: Binance):
+async def test_get_pair_btcusd(adapter: Huobi):
     pair_data = await adapter.get_pair('BTC', 'USDT')
     
     assert pair_data.from_coin == 'BTC'
@@ -28,7 +28,7 @@ async def test_get_pair_btcusd(adapter: Binance):
 
 
 @pytest.mark.asyncio
-async def test_get_pair_ltcbtc(adapter: Binance):
+async def test_get_pair_ltcbtc(adapter: Huobi):
     pair_data = await adapter.get_pair('LTC', 'BTC')
     
     assert pair_data.from_coin == 'LTC'
@@ -40,7 +40,7 @@ async def test_get_pair_ltcbtc(adapter: Binance):
 
 
 @pytest.mark.asyncio
-async def test_get_pair_hivebtc(adapter: Binance):
+async def test_get_pair_hivebtc(adapter: Huobi):
     pair_data = await adapter.get_pair('HIVE', 'BTC')
     
     assert pair_data.from_coin == 'HIVE'
@@ -50,3 +50,14 @@ async def test_get_pair_hivebtc(adapter: Binance):
     
     assert pair_data.last > HIVE_BTC
 
+
+@pytest.mark.asyncio
+async def test_get_pair_hiveusd(adapter: Huobi):
+    pair_data = await adapter.get_pair('HIVE', 'USD')
+    
+    assert pair_data.from_coin == 'HIVE'
+    assert pair_data.to_coin == 'USD'
+    
+    assert isinstance(pair_data.last, Decimal)
+    
+    assert pair_data.last > HIVE_USD

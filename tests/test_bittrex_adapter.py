@@ -38,3 +38,26 @@ async def test_get_pair_ltcbtc(adapter: Bittrex):
     
     assert pair_data.last > LTC_BTC
 
+
+@pytest.mark.asyncio
+async def test_get_pair_hivebtc(adapter: Bittrex):
+    pair_data = await adapter.get_pair('HIVE', 'BTC')
+    
+    assert pair_data.from_coin == 'HIVE'
+    assert pair_data.to_coin == 'BTC'
+    
+    assert isinstance(pair_data.last, Decimal)
+    
+    assert pair_data.last > HIVE_BTC
+
+
+@pytest.mark.asyncio
+async def test_get_pair_hiveusd(adapter: Bittrex):
+    pair_data = await adapter.get_pair('HIVE', 'USD')
+    
+    assert pair_data.from_coin == 'HIVE'
+    assert pair_data.to_coin == 'USD'
+    
+    assert isinstance(pair_data.last, Decimal)
+    
+    assert pair_data.last > HIVE_USD

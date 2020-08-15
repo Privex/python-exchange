@@ -4,18 +4,18 @@ from typing import Set, Tuple, Optional, AsyncGenerator, Dict, List, Union
 
 from async_property import async_property
 from httpx import HTTPError
-from privex.helpers import cached, empty, awaitable_class, r_cache_async, DictObject
-
-from privex.exchange.base import ExchangeAdapter, PriceData, ExchangeDown, PairNotFound
+from privex.helpers import empty, awaitable_class, r_cache_async, DictObject
+from privex.exchange.base import AsyncProvidesAdapter, PriceData
+from privex.exchange.exceptions import PairNotFound, ExchangeDown
 import httpx
-
 import logging
 
 log = logging.getLogger(__name__)
+# cached = adapter_get(AsyncMemoryCache)
 
 
-@awaitable_class
-class CoinGecko(ExchangeAdapter):
+# @awaitable_class
+class CoinGecko(AsyncProvidesAdapter):
     BASE_API = 'https://api.coingecko.com/api/v3'
     
     name = "CoinGecko"
@@ -74,24 +74,24 @@ class CoinGecko(ExchangeAdapter):
                 _provides.add((k.upper(), sym.upper(),))
         return _provides
     
-    @async_property
-    async def provides(self) -> Set[Tuple[str, str]]:
-        """
-        Coingecko provides ALL of their tickers through one GET query, so we can generate ``provides``
-        simply by querying their API via :meth:`._load_pairs` (using :meth:`._gen_provides`)
-
-        We cache the provides Set both class-locally in :attr:`._provides`, as well as via the Privex Helpers
-        Cache system - :mod:`privex.helpers.cache`
-
-        """
-        if empty(self._provides, itr=True):
-            _prov = await cached.get(f"pvxex:{self.code}:provides")
-            if not empty(_prov):
-                self._provides = _prov
-            else:
-                self._provides = await self._gen_provides()
-                await cached.set(f"pvxex:{self.code}:provides", self._provides)
-        return self._provides
+    # @async_property
+    # async def provides(self) -> Set[Tuple[str, str]]:
+    #     """
+    #     Coingecko provides ALL of their tickers through one GET query, so we can generate ``provides``
+    #     simply by querying their API via :meth:`._load_pairs` (using :meth:`._gen_provides`)
+    #
+    #     We cache the provides Set both class-locally in :attr:`._provides`, as well as via the Privex Helpers
+    #     Cache system - :mod:`privex.helpers.cache`
+    #
+    #     """
+    #     if empty(self._provides, itr=True):
+    #         _prov = await self.cache.get(f"pvxex:{self.code}:provides")
+    #         if not empty(_prov):
+    #             self._provides = _prov
+    #         else:
+    #             self._provides = await self._gen_provides()
+    #             await self.cache.set(f"pvxex:{self.code}:provides", self._provides)
+    #     return self._provides
     
     async def _query(self, endpoint='') -> Union[list, dict]:
         async with httpx.AsyncClient() as client:

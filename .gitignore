@@ -5,6 +5,9 @@ __pycache__
 .vscode
 .pytest_cache
 
+# random python scripts used for local debugging / manual testing during development
+/dev_*.py
+
 # PyPi build files
 build
 dist

@@ -78,7 +78,8 @@ setup(
         'httpx>=0.12.0',
         'attrs',
         'async-property',
-        'privex-helpers[cache]>=2.10.0'
+        'privex-helpers[cache]>=2.18.0',
+        'privex-steemengine>=2.1.0'
     ],
     packages=find_packages(exclude=['tests', 'tests.*', 'test.*']),
     cmdclass=extra_commands,

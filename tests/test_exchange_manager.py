@@ -12,7 +12,6 @@ nest_asyncio.apply()
 log = logging.getLogger(__name__)
 
 
-
 @pytest.fixture()
 async def adapter():
     adapter = ExchangeManager()
@@ -96,3 +95,38 @@ async def test_get_pair_dogeltc(adapter: ExchangeManager):
     
     assert_almost(ex_dogeltc, calc_dogeltc, Decimal('0.001'))
 
+# ----
+
+
+@pytest.mark.asyncio
+async def test_get_avg_btcusd(adapter: ExchangeManager):
+    price = await adapter.get_avg('BTC', 'USDT')
+    log.debug(f'BTC/USDT: {price}')
+    
+    assert isinstance(price, Decimal)
+    
+    assert price > BTC_USD
+
+
+@pytest.mark.asyncio
+async def test_get_avg_ltcbtc(adapter: ExchangeManager):
+    price = await adapter.get_avg('LTC', 'BTC')
+    log.debug(f'LTC/BTC: {price}')
+    
+    assert isinstance(price, Decimal)
+    assert price > LTC_BTC
+
+
+@pytest.mark.asyncio
+async def test_get_avg_hiveusd(adapter: ExchangeManager):
+    ex_hivebtc = await adapter.get_avg('HIVE', 'BTC')
+    ex_btcusd = await adapter.get_avg('BTC', 'USD')
+    ex_hiveusd = await adapter.get_avg('HIVE', 'USD')
+    
+    calc_hiveusd = ex_hivebtc * ex_btcusd
+    log.debug(f'HIVE/BTC: {ex_hivebtc} BTC/USD: {ex_btcusd} HIVE/USD: {ex_hiveusd} Calc HIVE/USD: {calc_hiveusd}')
+    
+    assert isinstance(ex_hiveusd, Decimal)
+    assert ex_hiveusd > HIVE_USD
+    
+    assert_almost(ex_hiveusd, calc_hiveusd, Decimal('0.01'))

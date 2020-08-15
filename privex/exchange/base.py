@@ -1,57 +1,49 @@
 import asyncio
-from abc import ABC, abstractmethod, abstractproperty
-from typing import Set, Union, Optional, Awaitable, Dict, Type, Tuple
-
 import attr
-from async_property import AwaitableOnly
-from privex.helpers import cached, Tuple, List, AttribDictable, Decimal, empty, camel_to_snake, PrivexException, awaitable, await_if_needed
-from privex.helpers.cache import adapter_get, adapter_set, AsyncCacheAdapter, AsyncMemoryCache
 import logging
 import importlib
-
-from decimal import getcontext
+from abc import ABC, abstractmethod
+from datetime import datetime
+from typing import Set, Union, Optional, Awaitable, Dict, Type, Tuple, List
+from decimal import Decimal, getcontext
+from async_property import AwaitableOnly, async_property
+from privex.helpers import AttribDictable, empty, camel_to_snake, await_if_needed, dec_round, r_cache_async, empty_if
+from privex.helpers.cache import async_adapter_get, async_adapter_set, AsyncCacheAdapter, AsyncMemoryCache
+from privex.exchange.exceptions import PairNotFound, ProxyMissingPair
+from privex.exchange.helpers import med_avg_out, avg, empty_decimal, PairListOrSet
 
 getcontext().prec = 30
 
 log = logging.getLogger(__name__)
 
-_curr_adapter = adapter_get()
+ZERO, ONE, TWO = Decimal('0'), Decimal('1'), Decimal('2')
+_curr_adapter = async_adapter_get()
 
 if not isinstance(_curr_adapter, AsyncCacheAdapter):
     log.warning("WARNING: Current privex.helpers cache adapter is not an Async adapter.")
     log.warning("Current privex.helpers adapter: %s", _curr_adapter.__class__.__name__)
     log.warning("Setting privex.helpers cache adapter to 'AsyncMemoryCache'.")
-    adapter_set(AsyncMemoryCache())
+    async_adapter_set(AsyncMemoryCache())
+
+cached = async_adapter_get()
+# cached = async_cached
+# cached.ins_exit_close = False
+# cached.ins_enter_reconnect = False
 
 
-class ExchangeException(PrivexException):
-    """Base exception for all exceptions that are part of :mod:`privex.exchange`"""
-    pass
+def disable_cache_context_reset():
+    try:
+        from privex.helpers.cache import AsyncRedisCache
+        if isinstance(cached, AsyncRedisCache):
+            cached.ins_exit_close = False
+            cached.ins_enter_reconnect = False
+        AsyncRedisCache.adapter_enter_reconnect = False
+        AsyncRedisCache.adapter_exit_close = False
+    except ImportError:
+        pass
 
 
-class PairNotFound(ExchangeException):
-    """Raised when a requested coin pair isn't supported by this exchange adapter"""
-    pass
-
-
-class ProxyMissingPair(PairNotFound):
-    """Raised when a requested coin pair required for try_proxy does not exist."""
-    pass
-
-
-class ExchangeDown(ExchangeException):
-    """Raised when an exchange appears to be down, e.g. timing out or throwing 4xx / 5xx errors."""
-    pass
-
-
-class ExchangeRateLimited(ExchangeDown):
-    """Raised when an exchange adapter encounters a rate limit while querying an exchange"""
-    pass
-
-
-def empty_decimal(obj: Optional[Decimal]):
-    if empty(obj): return None
-    return Decimal(obj)
+disable_cache_context_reset()
 
 
 @attr.s
@@ -71,9 +63,6 @@ class PriceData(AttribDictable):
     low = attr.ib(default=None, type=Decimal, converter=empty_decimal)
 
     volume = attr.ib(default=None, type=Decimal, converter=empty_decimal)
-
-
-PairListOrSet = Union[List[Tuple[str, str]], Set[List[Tuple[str, str]]]]
 
 
 class ExchangeAdapter(ABC):
@@ -110,7 +99,11 @@ class ExchangeAdapter(ABC):
         
         self.validate_provides = validate_provides
         self.ex_settings = dict(ex_settings)
-        
+    
+    @property
+    def cache(self) -> AsyncCacheAdapter:
+        return cached
+    
     @property
     @abstractmethod
     def provides(self) -> Union[Set[Tuple[str, str]], Awaitable[Set[Tuple[str, str]]]]:
@@ -174,18 +167,19 @@ class ExchangeAdapter(ABC):
         
         code = self.code
         ckey = f"pvxex:{code}:{from_coin}_{to_coin}"
-        cdata = await cached.get(ckey)
-        if not empty(cdata):
-            if isinstance(cdata, PriceData):
-                return cdata
-        
-            if isinstance(cdata, dict):
-                return PriceData(**cdata)
-            log.warning("Error reading cache key '%s' - Data was neither PriceData nor dict. Data was: %s", ckey, cdata)
-            log.warning(f"Will call {self.__class__.__name__}._get_pair and re-write cache key...")
-        
-        data = await self._get_pair(from_coin=from_coin, to_coin=to_coin)
-        await cached.set(ckey, data, self.cache_timeout)
+        with cached:
+            cdata = await cached.get(ckey)
+            if not empty(cdata):
+                if isinstance(cdata, PriceData):
+                    return cdata
+            
+                if isinstance(cdata, dict):
+                    return PriceData(**cdata)
+                log.warning("Error reading cache key '%s' - Data was neither PriceData nor dict. Data was: %s", ckey, cdata)
+                log.warning(f"Will call {self.__class__.__name__}._get_pair and re-write cache key...")
+            
+            data = await self._get_pair(from_coin=from_coin, to_coin=to_coin)
+            await cached.set(ckey, data, self.cache_timeout)
         
         return data
 
@@ -193,21 +187,35 @@ class ExchangeAdapter(ABC):
 class ExchangeManager:
     """
     
-    Basic usage::
+    **Basic Usage**
+    
+    First create an :class:`.ExchangeManager` instance::
     
         >>> from privex.exchange import ExchangeManager
         >>> exm = ExchangeManager()
+    
+    Using :meth:`.get_avg` - we can get the average price for a given coin pair based on all exchanges which support that pair, as well
+    as exchanges which have a proxy route (e.g. ``LTC -> BTC -> USD``)::
+    
+        >>> await exm.get_avg('btc', 'usd')
+        Decimal('9252.50525000')
+    
+    You can also use :meth:`.get_pair`, which simply finds the simplest route (including proxies) via one or two exchanges to
+    obtain a price::
+    
         >>> await exm.get_pair('btc', 'usd')
-        Decimal('6694.53000000')
+        Decimal('9249.03000000')
         >>> await exm.get_pair('ltc', 'usd')
-        Decimal('40.15000000')
+        Decimal('43.88000000')
     
     Converting arbitrary cryptos between each other, seamlessly::
-        
-        >>> await exm.get_pair('eos', 'ltc')    # LTC per 1 EOS
+    
+        >>> await exm.get_avg('eos', 'ltc')     # LTC per 1 EOS (average via all exchanges)
+        Decimal('0.0580638770094616213117276469457')
+        >>> await exm.get_pair('eos', 'ltc')    # LTC per 1 EOS (direct / semi-direct)
         Decimal('0.05957304869913275517011340894')
-        >>> await exm.get_pair('hive', 'eos')   # EOS per 1 HIVE
-        Decimal('0.04325307950727883538633818590')
+        >>> await exm.get_avg('hive', 'eos')   # EOS per 1 HIVE
+        Decimal('0.0878733984247395738811658379006')
     
     
     """
@@ -215,7 +223,10 @@ class ExchangeManager:
         ('privex.exchange.Binance', 'Binance'),
         ('privex.exchange.Bittrex', 'Bittrex'),
         ('privex.exchange.Kraken', 'Kraken'),
+        ('privex.exchange.Huobi', 'Huobi'),
         ('privex.exchange.CoinGecko', 'CoinGecko'),
+        ('privex.exchange.SteemEngine', 'SteemEngine'),
+        ('privex.exchange.SteemEngine', 'HiveEngine'),
     ]
     
     ex_instances: Dict[str, ExchangeAdapter] = {}
@@ -232,9 +243,18 @@ class ExchangeManager:
         'USDC': 'USD',
     }
     
-    proxy_coins = ['BTC', 'USD', 'USDT']
+    proxy_coins = ['BTC', 'USD', 'USDT', 'HIVE', 'STEEM']
+    common_proxies = ['BTC', 'USD']
+    _proxy_rates: Dict[str, Decimal] = {}
+    proxy_rates_timestamp: Optional[datetime] = None
+    proxy_rates_timeout: Union[int, float] = 300
     
     loaded = False
+
+    def __init__(self):
+        disable_cache_context_reset()
+        if getcontext().prec is None or getcontext().prec < 30:
+            getcontext().prec = 30
 
     @classmethod
     async def load_exchange(cls, package: str, name: str) -> ExchangeAdapter:
@@ -258,6 +278,19 @@ class ExchangeManager:
             await cls._import_pairs(inst)
 
         return cls.ex_instances[obj_path]
+
+    @classmethod
+    async def reload_all_pairs(cls):
+        for obj_path, inst in cls.ex_instances.items():
+            log.debug("Reloading pairs for adapter %s", obj_path)
+            await cls._import_pairs(inst)
+        log.debug("Finished reloading all provider pairs")
+        return cls.ex_pair_map
+
+    @classmethod
+    async def reload_inst_pairs(cls, obj_path: str):
+        inst = cls.ex_instances[obj_path]
+        return await cls._import_pairs(inst)
 
     @classmethod
     async def _import_pairs(cls, inst: ExchangeAdapter):
@@ -324,15 +357,17 @@ class ExchangeManager:
 
     @classmethod
     async def load_exchanges(cls):
+        coros = []
         for pkg_path, obj_name in cls.available_adapters:
             obj_path = '.'.join([pkg_path, obj_name])
             if obj_path in cls.ex_instances:
                 continue
-            try:
-                await cls.load_exchange(pkg_path, obj_name)
-            except:
-                log.exception("Skipping adapter %s due to exception ...", obj_path)
-        
+            coros.append(cls.load_exchange(pkg_path, obj_name))
+            # try:
+            # except:
+            #     log.exception("Skipping adapter %s due to exception ...", obj_path)
+        if len(coros) > 0:
+            await asyncio.gather(*coros, return_exceptions=True)
         cls.loaded = True
     
     @classmethod
@@ -368,6 +403,31 @@ class ExchangeManager:
             raise PairNotFound(f"Pair '{pair}' has no listed exchanges in {cls.__name__}.ex_pair_map")
         
         return cls.ex_pair_map[pair]
+    
+    @classmethod
+    async def get_proxy_avg(cls, from_coin: str, to_coin: str) -> Decimal:
+        """
+        Attempt to retrieve the average exchange rate for ``from_coin/to_coin`` using the proxy coin averages, which
+        are retrieved and cached from :meth:`.get_proxy_rates`
+        
+            >>> await ExchangeManager.get_proxy_avg('BTC', 'USD')
+            Decimal('9194.89249999')
+        
+            >>> await ExchangeManager.get_proxy_avg('HIVE', 'USD')
+            Decimal('0.21594933')
+            >>> await ExchangeManager.get_proxy_avg('USD', 'HIVE')
+            
+        :param from_coin:
+        :param to_coin:
+        :return:
+        """
+        pr = await cls.get_proxy_rates()
+        from_coin, to_coin = from_coin.upper(), to_coin.upper()
+        if f"{from_coin}_{to_coin}" in pr:
+            return pr[f"{from_coin}_{to_coin}"]
+        if f"{to_coin}_{from_coin}" in pr:
+            return ONE / pr[f"{to_coin}_{from_coin}"]
+        raise ProxyMissingPair(f"Could not find average proxy rate for {from_coin}/{to_coin}")
     
     @classmethod
     async def try_proxy(cls, from_coin: str, to_coin: str, proxy: str = "BTC", rate='last', adapter: ExchangeAdapter = None):
@@ -412,14 +472,23 @@ class ExchangeManager:
         # get ticker for HIVE/BTC - get ticker for USD/BTC
         # e.g. HIVE/BTC = 0.00001545    BTC/USD = 6900
         # 0.00001545 * 6900 = 0.106605 USD per HIVE
-        ex_from = await get_ticker(from_coin, proxy)
+        try:
+            ex_from = {rate: await cls.get_proxy_avg(from_coin=from_coin, to_coin=proxy)}
+        except ProxyMissingPair:
+            ex_from = await get_ticker(from_coin, proxy)
         if inv_to:
-            ex_to = await get_ticker(to_coin, proxy)
+            try:
+                ex_to = {rate: await cls.get_proxy_avg(from_coin=to_coin, to_coin=proxy)}
+            except ProxyMissingPair:
+                ex_to = await get_ticker(to_coin, proxy)
             log.debug("Original rates from reverse proxy %s/%s - rates: %s", to_coin, proxy, ex_to)
             ex_to = ExchangeManager._invert_data(ex_to)
             log.debug("Inverted rates - converted pair into %s/%s : %s", proxy, to_coin, ex_to)
         else:
-            ex_to = await get_ticker(proxy, to_coin)
+            try:
+                ex_to = {rate: await cls.get_proxy_avg(from_coin=proxy, to_coin=to_coin)}
+            except ProxyMissingPair:
+                ex_to = await get_ticker(proxy, to_coin)
 
         r_from, r_to = Decimal(ex_from[rate]), Decimal(ex_to[rate])
         
@@ -443,6 +512,80 @@ class ExchangeManager:
         new_pd.from_coin, new_pd.to_coin = new_pd.to_coin, new_pd.from_coin
         
         return new_pd
+    
+    @async_property
+    async def proxy_rates(self) -> Dict[str, Decimal]:
+        """This is just an AsyncIO property for :meth:`.get_proxy_rates`"""
+        return await self.get_proxy_rates()
+    
+    @classmethod
+    @r_cache_async(lambda cls: f"pvxex:exm:proxy_rates:{','.join(cls.proxy_coins)}", cache_time=proxy_rates_timeout)
+    async def get_proxy_rates(cls) -> Dict[str, Decimal]:
+        """
+        Retrieves and caches proxy rates from :meth:`.prep_proxy_rates`
+        """
+        pr = await cls.prep_proxy_rates()
+        return pr
+    
+    @classmethod
+    async def prep_proxy_rates(cls) -> Dict[str, Decimal]:
+        """
+        Internal usage. Initialises / updates :attr:`._proxy_rates` with string coin pairs mapped to their exchange rate.
+        
+        
+        Sets :attr:`._proxy_rates` and returns a dictionary of proxy coin pairs mapped to their ex rate::
+        
+            {'BTC_USD': Decimal('9183.20224999'), 'BTC_USDT': Decimal('9190.78333333'), 'BTC_HIVE': Decimal('42500.00000000'),
+             'BTC_STEEM': Decimal('44900.00000000'), 'USD_USDT': Decimal('1.00085000'), 'USDT_BTC': Decimal('0.00010869'),
+             'USDT_USD': Decimal('0.99920000'), 'HIVE_BTC': Decimal('0.00002362'), 'HIVE_USD': Decimal('0.21596266'),
+             'HIVE_USDT': Decimal('0.21577000'), 'HIVE_STEEM': Decimal('1.06000100'), 'STEEM_BTC': Decimal('0.00002231'),
+             'STEEM_USD': Decimal('0.20394399'), 'STEEM_HIVE': Decimal('0.92999999')
+             }
+        
+        """
+        if not cls.loaded: await cls.load_exchanges()
+        
+        # ex_rates: Dict[str, Dict[str, Decimal]] = {}
+        ex_rates_avg: Dict[str, Decimal] = {}
+        
+        rate_coros = []
+        
+        async def x_rates(f, t):
+            rates = await cls.get_all_rates(from_coin=f, to_coin=t)
+            return f"{f}_{t}", rates
+        
+        for frm in cls.proxy_coins:
+            for to in cls.proxy_coins:
+                if frm == to: continue
+                rate_coros.append(x_rates(frm, to))
+                # pair = f"{frm}_{to}"
+                # for _, adp in cls.ex_instances.items():
+                #     try:
+                #         if not await adp.has_pair(frm, to): continue
+                #         if pair not in ex_rates:
+                #             ex_rates[pair] = {}
+                #         log.debug(f"Getting proxy rate for {pair} from exchange '{adp.code}'")
+                #         pd = await adp.get_pair(from_coin=frm, to_coin=to)
+                #         if empty(pd.last, zero=True):
+                #             raise ValueError(f"Price data 'last' from exchage '{adp.code}' was empty / zero!")
+                #         ex_rates[pair][adp.code] = pd.last
+                #     except Exception as e:
+                #         log.warning(f"Failed to get {pair} from exchange '{adp.code}'. Reason: %s %s", type(e), str(e))
+        
+        rate_res = await asyncio.gather(*rate_coros, return_exceptions=True)
+        # for p, rates in ex_rates.items():
+        for res in rate_res:
+            if not isinstance(res, tuple): continue
+            
+            if len(res[1].values()) < 1:
+                # log.debug("Pair %s has no values. Skipping.", p)
+                continue
+            ex_rates_avg[res[0]] = med_avg_out(*res[1].values())
+            log.debug("Average rate for %s is %f - based on: %s", res[0], ex_rates_avg[res[0]], res[1])
+        
+        log.debug("Got proxy averages: %s", ex_rates_avg)
+        cls._proxy_rates = ex_rates_avg
+        return cls._proxy_rates
     
     @classmethod
     async def _get_ticker(cls, from_coin: str, to_coin: str, ex_index: int = 0) -> PriceData:
@@ -498,21 +641,6 @@ class ExchangeManager:
                     )
             
         return data
-        # data = {}
-        # try:
-        #     cls.pair_exists(from_coin, to_coin, should_raise=True)
-        # except PairNotFound:
-        #     log.info("Pair %s/%s was not found. Trying inverse query using %s/%s", from_coin, to_coin, to_coin, from_coin)
-        #     cls.pair_exists(to_coin, from_coin, should_raise=True)
-        #     for adp in cls.ex_pair_map[f"{to_coin}_{from_coin}"]:
-        #         data[adp.code] = ExchangeManager._invert_data(await adp.get_pair(to_coin, from_coin))[rate]
-        #     return data
-        #
-        # for adp in cls.ex_pair_map[f"{from_coin}_{to_coin}"]:
-        #     d = await adp.get_pair(from_coin, to_coin)
-        #     data[adp.code] = d[rate]
-        #
-        # return data
 
     @classmethod
     async def _find_proxy(cls, from_coin: str, to_coin: str, adapter: ExchangeAdapter = None) -> str:
@@ -548,7 +676,156 @@ class ExchangeManager:
                 return c
         raise ProxyMissingPair(f"Could not find a viable proxy route for {from_coin} -> {to_coin}")
     
-    async def get_pair(self, from_coin: str, to_coin: str, rate='last', use_proxy: bool = True):
+    @classmethod
+    async def get_all_rates(cls, from_coin: str, to_coin: str, rate='last', invert=False):
+        if not cls.loaded: await cls.load_exchanges()
+        from_coin, to_coin = from_coin.upper(), to_coin.upper()
+        # frm, to = from_coin, to_coin
+        pair = f"{from_coin}_{to_coin}"
+        ex_rates = {}
+        
+        async def _get_rate(frm, to, adp, rate_key):
+            try:
+                if not await adp.has_pair(frm, to): return None
+                # if pair not in ex_rates: ex_rates[pair] = {}
+                log.debug(f"Getting rate for {pair} from exchange '{adp.code}'")
+                pd = await adp.get_pair(from_coin=frm, to_coin=to)
+                if empty(pd.last, zero=True):
+                    raise ValueError(f"Price data 'last' from exchange '{adp.code}' was empty / zero!")
+                # ex_rates[adp.code] = pd[rate]
+                return adp.code, pd[rate_key]
+            except Exception as e:
+                log.warning(f"Failed to get {pair} from exchange '{adp.code}'. Reason: %s %s", type(e), str(e))
+                return None
+        
+        rate_tasks = [_get_rate(from_coin, to_coin, adapter, rate) for adapter in cls.ex_instances.values()]
+        rate_res = await asyncio.gather(*rate_tasks, return_exceptions=True)
+        
+        for r in rate_res:
+            if not isinstance(r, tuple): continue
+            ex_rates[r[0]] = ONE / r[1] if invert else r[1]
+        # for _, adapter in cls.ex_instances.items():
+        #     try:
+        #         if not await adp.has_pair(frm, to): continue
+        #         # if pair not in ex_rates: ex_rates[pair] = {}
+        #         pd = await adp.get_pair(from_coin=frm, to_coin=to)
+        #         if empty(pd.last, zero=True):
+        #             raise ValueError(f"Price data 'last' from exchage '{adp.code}' was empty / zero!")
+        #         ex_rates[adp.code] = pd[rate]
+        #         log.debug(f"Getting rate for {pair} from exchange '{adp.code}'")
+        #     except Exception as e:
+        #         log.warning(f"Failed to get {pair} from exchange '{adp.code}'. Reason: %s %s", type(e), str(e))
+        log.debug("All rates (inverted: %s) for %s/%s: %s", invert, from_coin, to_coin, ex_rates)
+        return ex_rates
+    
+    @classmethod
+    async def get_direct_rate_avg(cls, from_coin: str, to_coin: str, rate='last', invert=False) -> Optional[Decimal]:
+        if rate == 'last':
+            try:
+                r = await cls.get_proxy_avg(from_coin, to_coin)
+                return ONE / r if invert else r
+            except ProxyMissingPair:
+                pass
+        # proxy_rates = await cls.get_proxy_rates()
+        # pair, inv_pair = f"{from_coin}_{to_coin}", f"{to_coin}_{from_coin}"
+        # if pair in proxy_rates:
+        #     return ONE / proxy_rates[pair] if invert else proxy_rates[pair]
+        # if inv_pair in proxy_rates:
+        #     return proxy_rates[inv_pair] if invert else ONE / proxy_rates[inv_pair]
+        
+        rates = await cls.get_all_rates(from_coin, to_coin, rate=rate, invert=invert)
+        if len(rates) < 1:
+            return None
+        return med_avg_out(*rates.values())
+    
+    @classmethod
+    async def _get_avg_proxy(cls, from_coin: str, to_coin: str, proxy: str = 'BTC', fail=False, rate='last') -> Optional[Decimal]:
+        if not cls.loaded: await cls.load_exchanges()
+        from_coin, to_coin, proxy = from_coin.upper(), to_coin.upper(), proxy.upper()
+        
+        # To make the below proxy routes easier to understand, they're commented with examples
+        # based on: from_coin='HIVE', to_coin='USD', proxy='BTC' (HIVE/USD via BTC proxy)
+        
+        # HIVE/BTC -> BTC/USD
+        if cls.pair_exists(from_coin, proxy) and cls.pair_exists(proxy, to_coin):
+            avg_frm = await cls.get_direct_rate_avg(from_coin, proxy, rate=rate)  # HIVE -> BTC
+            avg_to = await cls.get_direct_rate_avg(proxy, to_coin, rate=rate)  # BTC -> USD
+        # HIVE/BTC -> USD/BTC
+        elif cls.pair_exists(from_coin, proxy) and cls.pair_exists(to_coin, proxy):
+            avg_frm = await cls.get_direct_rate_avg(from_coin, proxy, rate=rate)
+            avg_to = ONE / (await cls.get_direct_rate_avg(to_coin, proxy, rate=rate))
+        # BTC/HIVE -> BTC/USD
+        elif cls.pair_exists(proxy, from_coin) and cls.pair_exists(proxy, to_coin):
+            avg_frm = ONE / (await cls.get_direct_rate_avg(proxy, from_coin, rate=rate))
+            avg_to = await cls.get_direct_rate_avg(proxy, to_coin, rate=rate)
+        # BTC/HIVE -> USD/BTC
+        elif cls.pair_exists(proxy, from_coin) and cls.pair_exists(to_coin, proxy):
+            avg_frm = ONE / (await cls.get_direct_rate_avg(proxy, from_coin, rate=rate))
+            avg_to = ONE / (await cls.get_direct_rate_avg(to_coin, proxy, rate=rate))
+            
+        else:
+            log.info("Failed to find a proxy for %s / %s via %s", from_coin, to_coin, proxy)
+            if fail:
+                raise ProxyMissingPair(f"Could not find any route to get {from_coin} -> {to_coin} via {proxy}")
+            return None
+        
+        return avg_frm * avg_to
+
+    @classmethod
+    async def _get_avg_proxies(cls, from_coin: str, to_coin: str, *proxies, fail=False, rate='last') -> Optional[Decimal]:
+        proxies = [v.upper() for v in empty_if(proxies, cls.common_proxies, itr=True)]
+        for c in proxies:
+            avg_rate = await cls._get_avg_proxy(from_coin, to_coin, proxy=c, fail=False, rate=rate)
+            if not empty(avg_rate, True, True):
+                return avg_rate
+        if fail:
+            raise ProxyMissingPair(f"Could not find any route to get {from_coin} -> {to_coin} via proxies: {proxies}")
+        return None
+    
+    async def get_avg(self, from_coin: str, to_coin: str, use_proxy=True, rate='last', dp: int = 8) -> Decimal:
+        from_coin, to_coin = from_coin.upper(), to_coin.upper()
+        if not self.loaded:
+            await self.load_exchanges()
+        
+        # async def get_inverted(frm, to, xrate):
+        #     log.debug()
+        #     x = await self.get_direct_rate_avg(to, frm, rate=xrate)
+        #     if empty(x): return None
+        #     return ONE / x
+        
+        coros = []
+        
+        if use_proxy:
+            coros.append(self._get_avg_proxies(from_coin, to_coin, fail=True, rate=rate))
+        
+        pair = f"{from_coin}_{to_coin}"
+        if pair in self.ex_pair_map:
+            coros.append(self.get_direct_rate_avg(from_coin, to_coin, rate=rate))
+        elif f"{to_coin}_{from_coin}" in self.ex_pair_map:
+            coros.append(self.get_direct_rate_avg(to_coin, from_coin, rate=rate, invert=True))
+        
+        # if pair not in self.ex_pair_map:
+        #     if not use_proxy:
+        #         raise PairNotFound(f"Pair {pair} was not found in ex_pair_map, and no proxying requested.")
+        #     log.debug("%s not found in pair map - only using proxies", pair)
+        #     avg_rate = await self._get_avg_proxies(from_coin, to_coin, fail=True, rate=rate)
+        #     return avg_rate
+        # log.debug("%s WAS found in pair map - using both proxies and direct rates")
+        #
+        # _rates = await asyncio.gather(self._get_avg_proxies(from_coin, to_coin, fail=False, rate=rate),
+        #                               self.get_direct_rate_avg(from_coin, to_coin, rate=rate))
+        _rates = await asyncio.gather(*coros, return_exceptions=True)
+        return avg(*_rates, dp=dp)
+        # proxy_rate = await self._get_avg_proxies(from_coin, to_coin, fail=False, rate=rate)
+        # direct_rate = await self.get_direct_rate_avg(from_coin, to_coin, rate=rate)
+        # if empty(proxy_rate, True):
+        #     return direct_rate
+        # if empty(direct_rate, True):
+        #     return proxy_rate
+        # combined_avg = (proxy_rate + direct_rate) / TWO
+        # return dec_round(combined_avg, dp=8)
+        
+    async def get_pair(self, from_coin: str, to_coin: str, rate='last', use_proxy: bool = True, dp: int = 8):
         if not self.loaded:
             await self.load_exchanges()
         
@@ -571,10 +848,43 @@ class ExchangeManager:
         log.debug("Pair %s found - getting exchange rate directly", pair)
 
         data = await adp.get_pair(from_coin, to_coin)
-        return data[rate]
+        return dec_round(data[rate], dp=dp)
+
+
+class AsyncProvidesAdapter(ExchangeAdapter, ABC):
+    code: str
+    cache: AsyncCacheAdapter
+    _gen_provides: callable
+    
+    PROVIDES_CACHE_TIME: Union[int, float] = 300
+    """Amount of time (in seconds) to cache :attr:`.provides` for"""
+    
+    @async_property
+    async def provides(self) -> Set[Tuple[str, str]]:
+        """
+        Kraken provides ALL of their tickers through one GET query, so we can generate ``provides``
+        simply by querying their API via :meth:`.load_pairs` (using :meth:`._gen_provides`)
+
+        We cache the provides Set both class-locally in :attr:`._provides`, as well as via the Privex Helpers
+        Cache system - :mod:`privex.helpers.cache`
+
+        """
+        if empty(self._provides, itr=True):
+            log.debug("Getting _provides from cache for %s", self.code)
+            _prov = await self.cache.get(f"pvxex:{self.code}:provides")
+            if not empty(_prov):
+                # log.debug("Got _provides from cache")
+                self._provides = _prov
+            else:
+                # log.debug("Calling _gen_provides for %s", self.code)
+                self._provides = await self._gen_provides()
+                # log.debug("Adding _provides to cache for %s : %s", self.code, self._provides)
+                await self.cache.set(f"pvxex:{self.code}:provides", self._provides, timeout=self.PROVIDES_CACHE_TIME)
+        # log.debug("Returning _provides")
+        return self._provides
 
 
 __all__ = [
-    'PairNotFound', 'ExchangeRateLimited', 'ExchangeException', 'ExchangeAdapter', 'ExchangeDown', 'PriceData',
-    'ExchangeManager'
+    'ExchangeAdapter', 'PriceData',
+    'ExchangeManager', 'AsyncProvidesAdapter'
 ]

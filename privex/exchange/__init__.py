@@ -4,16 +4,23 @@ import warnings
 
 name = 'exchange'
 
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 
 try:
     from privex.exchange.base import *
+    from privex.exchange.exceptions import *
     from privex.exchange.Binance import Binance
     from privex.exchange.Bittrex import Bittrex
     from privex.exchange.CoinGecko import CoinGecko
     from privex.exchange.Kraken import Kraken
+    from privex.exchange.Huobi import Huobi
 except (ImportError, ModuleNotFoundError) as e:
     warnings.warn(f"Failed to import one or more modules: {type(e)} {str(e)}")
+
+try:
+    from privex.exchange.SteemEngine import SteemEngine, HiveEngine
+except (ImportError, ModuleNotFoundError) as e:
+    warnings.warn(f"Failed to import SteemEngine exchange adapter: {type(e)} {str(e)}")
 
 # If the privex.steemengine logger has no handlers, assume it hasn't been configured and set up a console logger
 # for any logs >=WARNING
